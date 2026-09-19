@@ -535,7 +535,7 @@ window.submitAuth = async function(event){
       await signInWithEmailAndPassword(auth, email, password);
     }
   }catch(err){
-    msg.textContent = friendlyError(err.code);
+    msg.textContent = friendlyError(err.code) + ' (' + err.code + ')';
   }finally{
     btn.disabled = false;
     btn.textContent = authMode === 'signup' ? 'Opret profil' : 'Log ind';
