@@ -234,20 +234,12 @@ let currentView = 'read';
 let editingId = null;
 let pendingImage = '';
 
-let books = JSON.parse(localStorage.getItem('bookly-books') || '[]');
-
-if (!books.length) {
-  books = [
-    {id:crypto.randomUUID(),title:'Min første bog',author:'',genre:'Fantasy',rating:5,note:'Tryk på blyanten for at ændre mig.',status:'read',image:'',dateRead:''},
-    {id:crypto.randomUUID(),title:'En hyggelig bog',author:'',genre:'Romantik',rating:4,note:'Her kan din egen mening stå.',status:'read',image:'',dateRead:''},
-    {id:crypto.randomUUID(),title:'Næste bog',author:'',genre:'Fantasy',rating:0,note:'',status:'want',image:'',dateRead:''}
-  ];
-  saveBooks();
-}
+let books = [];
 
 function saveBooks(){
-  localStorage.setItem('bookly-books', JSON.stringify(books));
+  // Firestore handles persistence in this version.
 }
+
 function esc(s=''){
   return s.replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -398,9 +390,11 @@ function toggleDateRead(){
   if(status.value==='want') date.value='';
 }
 
-function saveBookForm(){
+async function saveBookForm(){
   const title=document.getElementById('fTitle').value.trim();
   if(!title){ alert('Skriv bogens titel først 🌸'); return; }
+  if(!window.booklyCurrentUser){ alert('Du skal være logget ind.'); return; }
+
   const data={
     title,
     author:document.getElementById('fAuthor').value.trim(),
@@ -409,18 +403,22 @@ function saveBookForm(){
     dateRead:document.getElementById('fDateRead').value,
     note:document.getElementById('fNote').value.trim(),
     status:document.getElementById('fStatus').value,
-    image:pendingImage
+    image:pendingImage || ''
   };
   if(data.status==='want') data.dateRead='';
-  if(editingId){
-    books=books.map(b=>b.id===editingId?{...b,...data}:b);
-  }else{
-    books.unshift({id:crypto.randomUUID(),...data});
+
+  try{
+    if(editingId){
+      await window.booklyUpdateBook(editingId,data);
+    }else{
+      await window.booklyAddBook(data);
+    }
+    currentView=data.status;
+    switchView(currentView);
+    closeSheet();
+  }catch(err){
+    alert('Kunne ikke gemme bogen. ' + (err.message || 'Prøv igen.'));
   }
-  saveBooks();
-  currentView=data.status;
-  switchView(currentView);
-  closeSheet();
 }
 
 function showBook(id){
@@ -456,10 +454,14 @@ function moveToRead(id){
   if(!b) return;
   openBookForm(b.image,{...b,status:'read'});
 }
-function deleteBook(id){
+async function deleteBook(id){
   if(confirm('Vil du slette denne bog?')){
-    books=books.filter(b=>b.id!==id);
-    saveBooks();closeSheet();render();
+    try{
+      await window.booklyDeleteBook(id);
+      closeSheet();
+    }catch(err){
+      alert('Kunne ikke slette bogen. Prøv igen.');
+    }
   }
 }
 function showDiscover(){
@@ -481,6 +483,7 @@ render();
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
+import { getFirestore, collection, addDoc, doc, updateDoc, deleteDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDQ1rTTn14WYwJSuCq3Wx2G3iAJtU4CbMo",
@@ -493,7 +496,9 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
+const db = getFirestore(app);
 let authMode = 'login';
+let unsubscribeBooks = null;
 
 function friendlyError(code){
   const map = {
@@ -504,7 +509,7 @@ function friendlyError(code){
     'auth/missing-password':'Skriv et password.',
     'auth/network-request-failed':'Der er problemer med internetforbindelsen.'
   };
-  return map[code] || 'Noget gik galt. Prøv igen.';
+  return map[code] || ('Noget gik galt. Prøv igen. (' + code + ')');
 }
 
 window.showAuthMode = function(mode){
@@ -535,7 +540,7 @@ window.submitAuth = async function(event){
       await signInWithEmailAndPassword(auth, email, password);
     }
   }catch(err){
-    msg.textContent = friendlyError(err.code) + ' (' + err.code + ')';
+    msg.textContent = friendlyError(err.code);
   }finally{
     btn.disabled = false;
     btn.textContent = authMode === 'signup' ? 'Opret profil' : 'Log ind';
@@ -543,6 +548,44 @@ window.submitAuth = async function(event){
 };
 
 window.booklyLogout = async function(){ await signOut(auth); };
+
+
+window.booklyAddBook = async function(data){
+  const uid = auth.currentUser.uid;
+  await addDoc(collection(db,'users',uid,'books'),{
+    ...data,
+    createdAt:serverTimestamp(),
+    updatedAt:serverTimestamp()
+  });
+};
+
+window.booklyUpdateBook = async function(id,data){
+  const uid = auth.currentUser.uid;
+  await updateDoc(doc(db,'users',uid,'books',id),{
+    ...data,
+    updatedAt:serverTimestamp()
+  });
+};
+
+window.booklyDeleteBook = async function(id){
+  const uid = auth.currentUser.uid;
+  await deleteDoc(doc(db,'users',uid,'books',id));
+};
+
+function startBooksListener(uid){
+  if(unsubscribeBooks) unsubscribeBooks();
+  unsubscribeBooks = onSnapshot(
+    collection(db,'users',uid,'books'),
+    snapshot => {
+      books = snapshot.docs.map(d=>({id:d.id,...d.data()}));
+      render();
+    },
+    err => {
+      console.error('Firestore listener error',err);
+      alert('Bookly kunne ikke hente dine bøger fra databasen.');
+    }
+  );
+}
 
 onAuthStateChanged(auth, user => {
   const screen = document.getElementById('authScreen');
@@ -552,10 +595,14 @@ onAuthStateChanged(auth, user => {
     pill.style.display = 'block';
     pill.textContent = (user.displayName || user.email.split('@')[0]) + ' · Log ud';
     window.booklyCurrentUser = {uid:user.uid,email:user.email,name:user.displayName || ''};
+    startBooksListener(user.uid);
   }else{
     screen.style.display = 'flex';
     pill.style.display = 'none';
     window.booklyCurrentUser = null;
+    if(unsubscribeBooks){ unsubscribeBooks(); unsubscribeBooks=null; }
+    books = [];
+    render();
   }
 });
 </script>
